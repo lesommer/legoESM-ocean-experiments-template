@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# Detect the current machine and generate a machine YAML configuration.
+#
+# Usage:
+#   bin/lego-detect-machine              # Print detected info
+#   bin/lego-detect-machine --write       # Write machines/<hostname>.yaml
+#   bin/lego-detect-machine --nickname    # Print nickname only
+#   bin/lego-detect-machine --machine     # Print machine name (YAML filename) only
+
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+MACHINES_DIR="${REPO_DIR}/machines"
+HOSTNAME=$(hostname -s)
+
+# Try to find Python with yaml support
+detect_python() {
+    local py
+    for py in "${REPO_DIR}/../legoESM/.venv/bin/python3" python3 python; do
+        if command -v "$py" &>/dev/null && "$py" -c "import yaml" 2>/dev/null; then
+            echo "$py"
+            return
+        fi
+    done
+    echo ""
+}
+
+PYTHON=$(detect_python)
+
+# Look up machine by hostname in existing YAML files
+lookup_machine() {
+    if [ -z "$PYTHON" ]; then
+        return
+    fi
+    for yaml_file in "${MACHINES_DIR}"/*.yaml; do
+        [ -f "$yaml_file" ] || continue
+        local basename
+        basename=$(basename "$yaml_file" .yaml)
+        [ "$basename" = "_template" ] && continue
+        local match
+        match=$($PYTHON -c "
+import yaml, sys
+with open('$yaml_file') as f:
+    d = yaml.safe_load(f)
+hostnames = d.get('hostnames', [])
+if '$HOSTNAME' in hostnames:
+    print('$basename')
+    sys.exit(0)
+sys.exit(1)
+" 2>/dev/null) && echo "$match" && return
+    done
+}
+
+# Get nickname from machine YAML
+get_nickname() {
+    local machine="$1"
+    local yaml_file="${MACHINES_DIR}/${machine}.yaml"
+    if [ -f "$yaml_file" ] && [ -n "$PYTHON" ]; then
+        $PYTHON -c "
+import yaml
+with open('$yaml_file') as f:
+    d = yaml.safe_load(f)
+print(d.get('nickname', '$machine'))
+" 2>/dev/null
+    else
+        echo "$machine" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g'
+    fi
+}
+
+# Detect machine characteristics
+detect_info() {
+    local scheduler="null"
+    local devices="cpu"
+    local nproc
+
+    command -v sbatch &>/dev/null && scheduler="slurm"
+    command -v qsub &>/dev/null && scheduler="pbs"
+    command -v bsub &>/dev/null && scheduler="lsf"
+
+    nproc=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+
+    if command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null; then
+        devices="gpu"
+    fi
+
+    local mem_gb=""
+    if [ -n "$PYTHON" ]; then
+        mem_gb=$($PYTHON -c "
+import os
+try:
+    mem = round(os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES') / (1024**3))
+    print(mem)
+except:
+    try:
+        import subprocess
+        r = subprocess.run(['sysctl', '-n', 'hw.memsize'], capture_output=True, text=True)
+        if r.returncode == 0:
+            print(round(int(r.stdout.strip()) / (1024**3)))
+        else:
+            print('unknown')
+    except:
+        print('unknown')
+" 2>/dev/null)
+    fi
+
+    echo "hostname:   $HOSTNAME"
+    echo "scheduler:  $scheduler"
+    echo "devices:    $devices"
+    echo "nproc:      $nproc"
+    [ -n "$mem_gb" ] && echo "mem_gb:     $mem_gb"
+}
+
+# Generate machine YAML
+generate_yaml() {
+    local scheduler="null"
+    local devices="cpu"
+    local nproc
+
+    command -v sbatch &>/dev/null && scheduler="slurm"
+    command -v qsub &>/dev/null && scheduler="pbs"
+    command -v bsub &>/dev/null && scheduler="lsf"
+    nproc=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+    command -v nvidia-smi &>/dev/null && nvidia-smi &>/dev/null && devices="gpu"
+
+    local nickname
+    nickname=$(echo "$HOSTNAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g')
+
+    cat <<EOF
+nickname: ${nickname}
+hostnames:
+  - ${HOSTNAME}
+
+scheduler: ${scheduler}
+scheduler_partition: ""
+scheduler_account: ""
+scheduler_walltime: "01:00:00"
+scheduler_nodes: 1
+scheduler_tasks_per_node: ${nproc}
+
+devices: ${devices}
+n_devices: "auto"
+precision: mixed
+
+data_root: ""
+legoesm_dir: ""
+output_root: "./output"
+
+env_setup: []
+EOF
+}
+
+# Main
+MACHINE=$(lookup_machine)
+
+case "${1:-}" in
+    --write)
+        if [ -n "$MACHINE" ]; then
+            echo "Machine already configured: ${MACHINE} (machines/${MACHINE}.yaml)"
+            echo "Hostname ${HOSTNAME} matches existing config."
+        else
+            local outfile="${MACHINES_DIR}/${HOSTNAME}.yaml"
+            generate_yaml > "$outfile"
+            echo "Created: $outfile"
+            echo "Review and adjust the settings, especially:"
+            echo "  - nickname (used in experiment directory names)"
+            echo "  - data_root, legoesm_dir, output_root (paths)"
+            echo "  - env_setup (module loads, conda activation)"
+        fi
+        ;;
+    --nickname)
+        if [ -n "$MACHINE" ]; then
+            get_nickname "$MACHINE"
+        else
+            echo "$HOSTNAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g'
+        fi
+        ;;
+    --machine)
+        if [ -n "$MACHINE" ]; then
+            echo "$MACHINE"
+        else
+            echo "$HOSTNAME"
+        fi
+        ;;
+    *)
+        echo "Hostname:   $HOSTNAME"
+        if [ -n "$MACHINE" ]; then
+            echo "Machine:    ${MACHINE} (matched machines/${MACHINE}.yaml)"
+            echo "Nickname:   $(get_nickname "$MACHINE")"
+        else
+            echo "Machine:    not configured (run: bin/lego-detect-machine --write)"
+        fi
+        echo ""
+        detect_info
+        ;;
+esac

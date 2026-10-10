@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+WORKSPACE_DIR="$(dirname "$REPO_DIR")"
+TARGET="$WORKSPACE_DIR/AGENTS.md"
+SOURCE="$REPO_DIR/workspace-conventions.md"
+
+if [ ! -f "$SOURCE" ]; then
+    echo "ERROR: $SOURCE not found" >&2
+    exit 1
+fi
+
+if [ -L "$TARGET" ]; then
+    EXISTING="$(readlink "$TARGET")"
+    if [ "$EXISTING" = "$SOURCE" ]; then
+        echo "Already linked: $TARGET -> $SOURCE"
+        exit 0
+    fi
+    echo "Removing existing symlink: $TARGET -> $EXISTING"
+    rm "$TARGET"
+elif [ -e "$TARGET" ]; then
+    echo "WARNING: $TARGET exists and is not a symlink." >&2
+    echo "Backing up to $TARGET.bak and creating symlink." >&2
+    mv "$TARGET" "$TARGET.bak"
+fi
+
+ln -s "$SOURCE" "$TARGET"
+echo "Linked: $TARGET -> $SOURCE"

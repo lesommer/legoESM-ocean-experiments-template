@@ -1,0 +1,17 @@
+# Run declaration template.
+# Copy to runs/<nickname>_<YYYY-MM-DD>_<description>/run.yaml and fill in.
+#
+# Naming convention: <nickname>_<YYYY-MM-DD>_<description>
+#   <nickname>    from machines/<machine>.yaml "nickname" field
+#   <YYYY-MM-DD>  date the experiment was declared
+#   <description> short hyphen-separated description
+
+template: ""            # Required. Template name from legoESM-ocean-runners/templates/
+                        # (e.g. 3d_idealized/baroclinic_gyre)
+machine: ""             # Optional. Machine YAML filename in machines/ (e.g. my-machine).
+                        # If empty, auto-detected via bin/lego-detect-machine.
+overrides:              # Optional. Dot-notation overrides passed to init.
+  # grid.resolution: 128x256
+  # ocean.A_h: 1e6
+  # time.duration_days: 730
+status: planned         # planned | submitted | running | completed | failed

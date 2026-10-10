@@ -1,0 +1,389 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+RUNNERS_DIR="${LEGOESM_RUNNERS_DIR:-${REPO_DIR}/../legoESM-ocean-runners}"
+MACHINES_DIR="${REPO_DIR}/machines"
+
+# Detect Python with JAX + legoesm for running experiments
+detect_python() {
+    if [ -n "${LEGOESM_PYTHON:-}" ]; then
+        echo "$LEGOESM_PYTHON"
+        return
+    fi
+
+    local venv_python="${REPO_DIR}/../legoESM/.venv/bin/python3"
+    if [ -x "$venv_python" ]; then
+        if "$venv_python" -c "import jax" 2>/dev/null; then
+            echo "$venv_python"
+            return
+        fi
+    fi
+
+    echo "python3"
+}
+
+PYTHON=$(detect_python)
+
+# Resolve machine name from hostname by scanning machines/*.yaml
+resolve_machine() {
+    local hostname
+    hostname=$(hostname -s)
+    for yaml_file in "${MACHINES_DIR}"/*.yaml; do
+        [ -f "$yaml_file" ] || continue
+        local basename
+        basename=$(basename "$yaml_file" .yaml)
+        [ "$basename" = "_template" ] && continue
+        if "$PYTHON" -c "
+import yaml, sys
+with open('$yaml_file') as f:
+    d = yaml.safe_load(f)
+hostnames = d.get('hostnames', [])
+sys.exit(0 if '$hostname' in hostnames else 1)
+" 2>/dev/null; then
+            echo "$basename"
+            return
+        fi
+    done
+}
+
+# Get nickname from machine YAML
+get_nickname() {
+    local machine="$1"
+    local yaml_file="${MACHINES_DIR}/${machine}.yaml"
+    if [ -f "$yaml_file" ]; then
+        "$PYTHON" -c "
+import yaml
+with open('$yaml_file') as f:
+    d = yaml.safe_load(f)
+print(d.get('nickname', '$machine'))
+" 2>/dev/null
+    else
+        echo "$machine" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]//g'
+    fi
+}
+
+usage() {
+    cat <<EOF
+Usage: $(basename "$0") <command> <run-dir>
+
+Commands:
+  init       Read run.yaml, initialise experiment via runners
+  run        Execute the experiment via the runners
+  record     Re-generate experiment.tag from current state
+  reproduce  Reproduce the experiment from its experiment.tag
+
+Arguments:
+  <run-dir>  Path to the experiment directory (e.g. runs/<nickname>_<date>_<description>)
+
+Environment:
+  LEGOESM_RUNNERS_DIR  Path to legoESM-ocean-runners (default: ../legoESM-ocean-runners)
+  LEGOESM_PYTHON       Path to Python with JAX + legoesm (default: auto-detect from ../legoESM/.venv)
+
+Naming convention:
+  <nickname>_<YYYY-MM-DD>_<description>
+  e.g. laptop_2026-05-30_scm-convective
+       cluster_2026-07-01_orca1-tke
+EOF
+    exit 1
+}
+
+need_run_yaml() {
+    local run_dir="$1"
+    if [ ! -f "${run_dir}/run.yaml" ]; then
+        echo "ERROR: ${run_dir}/run.yaml not found" >&2
+        exit 1
+    fi
+}
+
+need_config_yaml() {
+    local run_dir="$1"
+    if [ ! -f "${run_dir}/config.yaml" ]; then
+        echo "ERROR: ${run_dir}/config.yaml not found. Run '$(basename "$0") init' first." >&2
+        exit 1
+    fi
+}
+
+need_tag() {
+    local run_dir="$1"
+    if [ ! -f "${run_dir}/experiment.tag" ]; then
+        echo "ERROR: ${run_dir}/experiment.tag not found. Run '$(basename "$0") init' first." >&2
+        exit 1
+    fi
+}
+
+parse_run_yaml() {
+    local run_dir="$1"
+    local field="$2"
+    "$PYTHON" -c "
+import yaml, sys
+with open('${run_dir}/run.yaml') as f:
+    d = yaml.safe_load(f)
+print(d.get('${field}', ''), end='')
+"
+}
+
+update_run_yaml_status() {
+    local run_dir="$1"
+    local new_status="$2"
+    "$PYTHON" -c "
+import yaml
+path = '${run_dir}/run.yaml'
+with open(path) as f:
+    d = yaml.safe_load(f)
+d['status'] = '${new_status}'
+with open(path, 'w') as f:
+    yaml.dump(d, f, default_flow_style=False, sort_keys=False)
+"
+}
+
+cmd_init() {
+    local run_dir
+    run_dir="$(cd "$1" && pwd)"
+
+    need_run_yaml "${run_dir}"
+
+    local template machine name
+    template="$(parse_run_yaml "${run_dir}" template)"
+    machine="$(parse_run_yaml "${run_dir}" machine)"
+    name="$(basename "${run_dir}")"
+
+    if [ -z "${template}" ]; then
+        echo "ERROR: 'template' field is required in run.yaml" >&2
+        exit 1
+    fi
+
+    if [ -z "${machine}" ]; then
+        machine=$(resolve_machine)
+        if [ -n "${machine}" ]; then
+            echo "Auto-detected machine: ${machine}"
+        else
+            machine=$(hostname -s)
+            echo "WARNING: No machine config found for $(hostname -s)" >&2
+            echo "         Run: bin/lego-detect-machine --write" >&2
+        fi
+    fi
+
+    local nickname
+    nickname=$(get_nickname "$machine")
+
+    if [ ! -d "${RUNNERS_DIR}" ]; then
+        echo "ERROR: Runners directory not found: ${RUNNERS_DIR}" >&2
+        echo "       Set LEGOESM_RUNNERS_DIR or ensure ../legoESM-ocean-runners exists" >&2
+        exit 1
+    fi
+
+    local init_cmd=(
+        "$PYTHON" -m runners.run_experiment init "${template}"
+        --name "${name}"
+        --output-dir "${run_dir}"
+    )
+
+    local override_args
+    override_args="$( "$PYTHON" -c "
+import yaml, sys, ast
+with open('${run_dir}/run.yaml') as f:
+    d = yaml.safe_load(f)
+ov = d.get('overrides', {}) or {}
+for k, v in ov.items():
+    if isinstance(v, str):
+        sv = v
+    else:
+        sv = repr(v)
+    print(f'{k}={sv}')
+" )" || true
+    if [ -n "${override_args}" ]; then
+        while IFS= read -r arg; do
+            [ -z "${arg}" ] && continue
+            init_cmd+=(-o "${arg}")
+        done <<< "${override_args}"
+    fi
+
+    local machine_cfg="${REPO_DIR}/machines/${machine}.yaml"
+    if [ -f "${machine_cfg}" ]; then
+        init_cmd+=(--machine "${machine_cfg}")
+    else
+        echo "WARNING: Machine config not found: ${machine_cfg}" >&2
+    fi
+
+    echo "Initialising experiment: ${name}"
+    echo "  Template: ${template}"
+    echo "  Machine:  ${machine} (nickname: ${nickname})"
+    echo "  Runners:  ${RUNNERS_DIR}"
+    echo "  Python:   ${PYTHON}"
+    echo "  Output:   ${run_dir}"
+
+    cd "${RUNNERS_DIR}"
+    "${init_cmd[@]}" || {
+        echo "ERROR: Init failed" >&2
+        exit 1
+    }
+
+    echo "Done. Files in ${run_dir}:"
+    ls -1 "${run_dir}"
+}
+
+get_scheduler() {
+    local machine="$1"
+    local yaml_file="${MACHINES_DIR}/${machine}.yaml"
+    if [ -f "$yaml_file" ]; then
+        "$PYTHON" -c "
+import yaml
+with open('$yaml_file') as f:
+    d = yaml.safe_load(f)
+print(d.get('scheduler', 'null') or 'null')
+" 2>/dev/null
+    else
+        echo "null"
+    fi
+}
+
+source_machine_env() {
+    local machine="$1"
+    local yaml_file="${MACHINES_DIR}/${machine}.yaml"
+    if [ -f "$yaml_file" ]; then
+        local env_cmds
+        env_cmds="$( "$PYTHON" -c "
+import yaml
+with open('$yaml_file') as f:
+    d = yaml.safe_load(f)
+for cmd in d.get('env_setup', []):
+    print(cmd)
+" 2>/dev/null )" || true
+        if [ -n "${env_cmds}" ]; then
+            while IFS= read -r cmd; do
+                [ -z "${cmd}" ] && continue
+                eval "${cmd}"
+            done <<< "${env_cmds}"
+        fi
+    fi
+}
+
+cmd_run() {
+    local run_dir
+    run_dir="$(cd "$1" && pwd)"
+
+    need_config_yaml "${run_dir}"
+
+    local name machine
+    name="$(basename "${run_dir}")"
+    machine="$(parse_run_yaml "${run_dir}" machine)"
+
+    if [ -z "${machine}" ]; then
+        machine=$(resolve_machine)
+    fi
+
+    local scheduler
+    scheduler=$(get_scheduler "$machine")
+
+    if [ "${scheduler}" = "slurm" ]; then
+        echo "Submitting experiment via SLURM: ${name}"
+        local job_id
+        job_id=$(cd "${run_dir}" && sbatch run.sh | tee /dev/stderr | grep -oP '\d+')
+        if [ -n "${job_id}" ]; then
+            echo "Submitted SLURM job: ${job_id}"
+            echo "  Monitor: squeue -j ${job_id}"
+            echo "  Cancel:  scancel ${job_id}"
+            echo "  Logs:    slurm-${job_id}.out"
+
+            update_run_yaml_status "${run_dir}" "submitted"
+
+            if [ -f "${run_dir}/experiment.tag" ]; then
+                local execution_date execution_hostname
+                execution_date=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+                execution_hostname=$(hostname -s)
+                "$PYTHON" -c "
+import configparser
+tag_path = '${run_dir}/experiment.tag'
+cp = configparser.ConfigParser()
+cp.optionxform = str
+cp.read(tag_path)
+if not cp.has_section('machine'):
+    cp.add_section('machine')
+cp.set('machine', 'execution_hostname', '${execution_hostname}')
+cp.set('machine', 'execution_date', '${execution_date}')
+cp.set('machine', 'slurm_job_id', '${job_id}')
+with open(tag_path, 'w') as f:
+    cp.write(f)
+" 2>/dev/null || true
+                echo "Updated experiment.tag with submission details (job_id=${job_id})"
+            fi
+        else
+            echo "ERROR: sbatch submission failed" >&2
+            exit 1
+        fi
+    else
+        echo "Running experiment directly: ${name}"
+
+        source_machine_env "${machine}"
+
+        cd "${RUNNERS_DIR}"
+        "$PYTHON" -m runners.run_experiment run "${run_dir}/config.yaml"
+
+        # Update experiment.tag with execution details
+        local execution_date execution_hostname
+        execution_date=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        execution_hostname=$(hostname -s)
+
+        if [ -f "${run_dir}/experiment.tag" ]; then
+            "$PYTHON" -c "
+import configparser, sys
+tag_path = '${run_dir}/experiment.tag'
+cp = configparser.ConfigParser()
+cp.optionxform = str
+cp.read(tag_path)
+if not cp.has_section('machine'):
+    cp.add_section('machine')
+cp.set('machine', 'execution_hostname', '${execution_hostname}')
+cp.set('machine', 'execution_date', '${execution_date}')
+with open(tag_path, 'w') as f:
+    cp.write(f)
+" 2>/dev/null || true
+            echo "Updated experiment.tag with execution details"
+        fi
+    fi
+}
+
+cmd_record() {
+    local run_dir
+    run_dir="$(cd "$1" && pwd)"
+
+    need_config_yaml "${run_dir}"
+
+    local template machine
+    template="$(parse_run_yaml "${run_dir}" template)"
+    machine="$(parse_run_yaml "${run_dir}" machine)"
+
+    cd "${RUNNERS_DIR}"
+    "$PYTHON" -m runners.run_experiment tag "${run_dir}/config.yaml" --template "${template}" \
+        > "${run_dir}/experiment.tag"
+
+    echo "Updated: ${run_dir}/experiment.tag"
+}
+
+cmd_reproduce() {
+    local run_dir
+    run_dir="$(cd "$1" && pwd)"
+
+    need_tag "${run_dir}"
+
+    echo "Reproducing experiment: $(basename "${run_dir}")"
+
+    cd "${RUNNERS_DIR}"
+    "$PYTHON" scripts/reproduce.py "${run_dir}/experiment.tag" "$@"
+}
+
+if [ $# -lt 2 ]; then
+    usage
+fi
+
+command="$1"
+shift
+
+case "${command}" in
+    init)       cmd_init "$1" ;;
+    run)        cmd_run "$1" ;;
+    record)     cmd_record "$1" ;;
+    reproduce)  cmd_reproduce "$@" ;;
+    *)          echo "ERROR: Unknown command: ${command}" >&2; usage ;;
+esac
