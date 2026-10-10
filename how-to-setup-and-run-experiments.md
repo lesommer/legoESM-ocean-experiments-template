@@ -19,12 +19,22 @@ git clone https://github.com/lesommer/legoESM-ocean-runners.git
 # clone your experiment ledger (from your own fork of this template):
 git clone <your-ledger-url>.git
 
-# 2. Install legoESM (uv workspace)
+# 2. Pin legoESM to the commit the runners are validated against
+#    (see legoESM-ocean-runners/legoESM_version.txt)
 cd legoESM
+git checkout $(grep '^commit:' ../legoESM-ocean-runners/legoESM_version.txt | cut -d: -f2 | tr -d ' ')
+
+# 3. Install legoESM (uv workspace)
 uv sync --extra dev
 # For MPI runs additionally: uv pip install -r requirements_mpi.txt
 
-# 3. Verify
+# 4. Apply the runners' patches to the legoESM checkout (REQUIRED:
+#    patch 001 fixes a macOS import failure; 002-005 enable the OMIP
+#    lanes. Dropped automatically at pin bumps once merged upstream.)
+cd ../legoESM-ocean-runners && bash scripts/apply_patches.sh
+
+# 5. Verify
+cd ../legoESM
 python -c "import jax; print(jax.default_backend(), jax.devices())"
 python -c "import legoesm; print('legoESM OK')"
 ```
