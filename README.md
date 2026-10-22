@@ -40,7 +40,8 @@ bin/lego-detect-machine --write    # first-guess YAML; edit nickname, paths, env
 ```bash
 mkdir -p runs/<nickname>_<date>_my-first-experiment
 cat > runs/<nickname>_<date>_my-first-experiment/run.yaml <<EOF
-template: 3d_idealized/baroclinic_gyre   # from legoESM-ocean-runners/templates/
+template: ocean/baroclinic_gyre   # runners-owned templates: legoESM-ocean-runners/templates/
+                                  # graduated templates: ocean/<stem> (resolved from legoESM)
 machine: my-machine                       # optional — auto-detected if omitted
 overrides:
   time.duration_days: 30

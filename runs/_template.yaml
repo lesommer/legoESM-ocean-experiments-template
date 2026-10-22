@@ -7,7 +7,8 @@
 #   <description> short hyphen-separated description
 
 template: ""            # Required. Template name from legoESM-ocean-runners/templates/
-                        # (e.g. 3d_idealized/baroclinic_gyre)
+                        # (e.g. ocean/baroclinic_gyre; graduated templates resolve
+                        #  as ocean/<stem>, legacy names still work)
 machine: ""             # Optional. Machine YAML filename in machines/ (e.g. my-machine).
                         # If empty, auto-detected via bin/lego-detect-machine.
 overrides:              # Optional. Dot-notation overrides passed to init.

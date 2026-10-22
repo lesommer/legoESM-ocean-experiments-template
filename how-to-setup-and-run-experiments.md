@@ -16,7 +16,8 @@ For full repository conventions, provenance rules, and boundary policies, see
 mkdir -p ~/lego-world && cd ~/lego-world
 git clone https://github.com/climate-federation/legoESM.git
 git clone https://github.com/lesommer/legoESM-ocean-runners.git
-# clone your experiment ledger (from your own fork of this template):
+# clone your experiment ledger (create it from this template via GitHub's
+# "Use this template" button):
 git clone <your-ledger-url>.git
 
 # 2. Pin legoESM to the commit the runners are validated against
@@ -26,11 +27,14 @@ git checkout $(grep '^commit:' ../legoESM-ocean-runners/legoESM_version.txt | cu
 
 # 3. Install legoESM (uv workspace)
 uv sync --extra dev
+source .venv/bin/activate
 # For MPI runs additionally: uv pip install -r requirements_mpi.txt
 
 # 4. Apply the runners' patches to the legoESM checkout (REQUIRED:
-#    patch 001 fixes a macOS import failure; 002-005 enable the OMIP
-#    lanes. Dropped automatically at pin bumps once merged upstream.)
+#    003-005 enable the tripolar-OMIP MPI lane, runoff-file overrides and
+#    a barotropic tuning knob; 006 stamps the runners' identity into the
+#    model's run manifest. Dropped automatically at pin bumps once merged
+#    upstream.)
 cd ../legoESM-ocean-runners && bash scripts/apply_patches.sh
 
 # 5. Verify
@@ -68,7 +72,7 @@ See `machines/_template.yaml` for the full schema with comments.
 ```bash
 mkdir -p runs/<nickname>_<date>_<description>
 cat > runs/<nickname>_<date>_<description>/run.yaml <<EOF
-template: 3d_idealized/baroclinic_gyre
+template: ocean/baroclinic_gyre
 machine: <machine>          # optional — auto-detected if omitted
 overrides:
   time.duration_days: 30
@@ -78,7 +82,11 @@ git add runs/<nickname>_<date>_<description>/run.yaml
 git commit -m "declare <nickname>_<date>_<description>" && git push
 ```
 
-Pick the template from `../legoESM-ocean-runners/templates/`.
+Templates live in `../legoESM-ocean-runners/templates/` (see its README for
+the browsable list). Graduated templates — those whose case is maintained
+in legoESM's own template library — resolve by canonical name
+`ocean/<stem>` (e.g. `ocean/baroclinic_gyre`); pre-graduation names like
+`3d_idealized/baroclinic_gyre` still resolve as legacy aliases.
 
 ## 4. Initialize (on the target machine)
 
@@ -106,7 +114,9 @@ bin/run-experiment run runs/<nickname>_<date>_<description>/
 - **SLURM/PBS**: the runner submits `run.sh` and prints the job id; monitor with
   `squeue`/`qstat`.
 - **OAR**: `run.sh` carries `#OAR` directives; submit with
-  `cd runs/<name> && oarsub -S ./run.sh`.
+  `cd runs/<name> && oarsub -S ./run.sh` (the `./` prefix is required —
+  `oarsub -S` executes its argument as a command, and a bare `run.sh`
+  fails PATH lookup).
 
 ## 6. Record
 
@@ -131,3 +141,11 @@ bin/run-experiment reproduce runs/<nickname>_<date>_<description>/
 # Checks out the runner tag + legoESM commit recorded in experiment.tag,
 # applies patches, and re-runs.
 ```
+
+Optional flags (passed through to the runners' `reproduce.py`):
+
+- `--verify` — audit the tag against the current checkout with no side
+  effects: recomputes the config hash and checks every recorded patch
+  content digest (exit 1 on drift)
+- `--run` — re-init applying the recorded overrides, so the rerun is the
+  same experiment, not a template-default lookalike

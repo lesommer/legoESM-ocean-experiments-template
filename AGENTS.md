@@ -150,7 +150,7 @@ Every experiment directory must contain a `run.yaml`. This is the file you autho
 to declare intent:
 
 ```yaml
-template: 3d_idealized/baroclinic_gyre   # Template name from legoESM-ocean-runners
+template: ocean/baroclinic_gyre   # Template name from legoESM-ocean-runners
 machine: my-machine                      # Machine YAML filename (matches machines/<name>.yaml). Optional — defaults to auto-detection via hostname
 overrides:                                # Dot-notation overrides passed to init
   grid.resolution: 128x256
@@ -161,7 +161,12 @@ status: planned                           # planned | submitted | running | comp
 
 **Field rules:**
 
-- `template` — required. Must match a template in `../legoESM-ocean-runners/templates/`.
+- `template` — required. Runners-owned templates live in
+  `../legoESM-ocean-runners/templates/`; graduated templates (cases
+  maintained in legoESM's own template library) resolve by canonical name
+  `ocean/<stem>` — pre-graduation names like `3d_idealized/baroclinic_gyre`
+  still resolve as legacy aliases. See the runners README for the browsable
+  list.
 - `machine` — optional. YAML filename in `machines/` (without path). If omitted,
   auto-detected from the current hostname using `bin/lego-detect-machine`.
 - `overrides` — optional. Dot-notation keys matching the template YAML structure.
