@@ -63,6 +63,60 @@ print(d.get('nickname', '$machine'))
     fi
 }
 
+# Harvest the run's run_manifest.json into experiment.tag [manifest].
+# The manifest is the run-time superset of experiment.tag (written by
+# legoESM at run start; state_digest filled at run end) — this stamps its
+# key results into the ledger's provenance record and cross-checks the
+# run-time legoESM commit against the init-time pin. Best-effort: a
+# missing/unreadable manifest is skipped silently, a commit mismatch is
+# reported loudly.
+stamp_manifest() {
+    local run_dir="$1"
+    [ -f "${run_dir}/experiment.tag" ] || return 0
+    "$PYTHON" - "${run_dir}" <<'EOF' || true
+import configparser
+import json
+import sys
+from pathlib import Path
+
+run_dir = Path(sys.argv[1])
+manifests = sorted(run_dir.rglob("run_manifest.json"),
+                   key=lambda p: p.stat().st_mtime)
+if not manifests:
+    sys.exit(0)
+mf_path = manifests[-1]  # most recent wins (multi-lane dirs)
+try:
+    mf = json.loads(mf_path.read_text())
+except (OSError, json.JSONDecodeError) as e:
+    print(f"WARNING: unreadable run_manifest.json at {mf_path}: {e}")
+    sys.exit(0)
+
+tag_path = run_dir / "experiment.tag"
+cp = configparser.ConfigParser()
+cp.optionxform = str
+cp.read(tag_path)
+if not cp.has_section("manifest"):
+    cp.add_section("manifest")
+cp.set("manifest", "file", str(mf_path.relative_to(run_dir)))
+cp.set("manifest", "state_digest",
+       str(mf.get("result", {}).get("state_digest") or "(not recorded)"))
+cp.set("manifest", "config_hash", str(mf.get("config", {}).get("config_hash") or ""))
+cp.set("manifest", "runner_tag", str(mf.get("reproducibility", {}).get("runner_tag") or ""))
+
+mf_commit = mf.get("legoESM", {}).get("commit", "")
+tag_commit = cp.get("legoESM", "commit", fallback="")
+if mf_commit and tag_commit and mf_commit != tag_commit:
+    print(f"WARNING: legoESM commit mismatch — experiment.tag pins "
+          f"{tag_commit[:12]}, the run used {mf_commit[:12]} "
+          f"(repo moved between init and run?)")
+
+with open(tag_path, "w") as f:
+    cp.write(f)
+print(f"Harvested run_manifest.json -> experiment.tag [manifest] "
+      f"({mf_path.relative_to(run_dir)})")
+EOF
+}
+
 usage() {
     cat <<EOF
 Usage: $(basename "$0") <command> <run-dir>
@@ -70,8 +124,12 @@ Usage: $(basename "$0") <command> <run-dir>
 Commands:
   init       Read run.yaml, initialise experiment via runners
   run        Execute the experiment via the runners
-  record     Re-generate experiment.tag from current state
+  record     Re-generate experiment.tag from current state (preserves the
+             recorded overrides + post-run stamps, harvests the manifest)
   reproduce  Reproduce the experiment from its experiment.tag
+  harvest    Stamp run_manifest.json results (state_digest, config_hash,
+             runner_tag) into experiment.tag [manifest] — for scheduler
+             runs, call after the job completes
 
 Arguments:
   <run-dir>  Path to the experiment directory (e.g. runs/<nickname>_<date>_<description>)
@@ -341,6 +399,11 @@ with open(tag_path, 'w') as f:
 " 2>/dev/null || true
             echo "Updated experiment.tag with execution details"
         fi
+
+        # Harvest the run-time manifest (state_digest, config_hash,
+        # runner_tag) into experiment.tag [manifest] — the manifest is
+        # written by legoESM during the run above.
+        stamp_manifest "${run_dir}"
     fi
 }
 
@@ -354,11 +417,66 @@ cmd_record() {
     template="$(parse_run_yaml "${run_dir}" template)"
     machine="$(parse_run_yaml "${run_dir}" machine)"
 
+    # The regenerator rebuilds the tag from the RESOLVED config: the
+    # recorded overrides are folded into config.yaml and cannot be
+    # recovered from it, and the post-run stamps ([machine] execution_*,
+    # [manifest]) are not inputs at all. Keep a copy and merge them back —
+    # otherwise `record` silently breaks reproduce.py --run (overrides
+    # line dropped) and the execution record.
+    if [ -f "${run_dir}/experiment.tag" ]; then
+        cp "${run_dir}/experiment.tag" "${run_dir}/.experiment.tag.prev"
+    fi
+
     cd "${RUNNERS_DIR}"
     "$PYTHON" -m runners.run_experiment tag "${run_dir}/config.yaml" --template "${template}" \
         > "${run_dir}/experiment.tag"
 
+    if [ -f "${run_dir}/.experiment.tag.prev" ]; then
+        "$PYTHON" - "${run_dir}" <<'EOF' || true
+import configparser
+import sys
+from pathlib import Path
+
+run_dir = Path(sys.argv[1])
+prev_path = run_dir / ".experiment.tag.prev"
+tag_path = run_dir / "experiment.tag"
+
+prev = configparser.ConfigParser(); prev.optionxform = str
+prev.read(prev_path)
+cur = configparser.ConfigParser(); cur.optionxform = str
+cur.read(tag_path)
+
+if prev.has_option("reproducibility", "overrides") and \
+        not cur.has_option("reproducibility", "overrides"):
+    if not cur.has_section("reproducibility"):
+        cur.add_section("reproducibility")
+    cur.set("reproducibility", "overrides", prev.get("reproducibility", "overrides"))
+if prev.has_section("machine"):
+    if not cur.has_section("machine"):
+        cur.add_section("machine")
+    for key in ("execution_hostname", "execution_date", "slurm_job_id"):
+        if prev.has_option("machine", key) and not cur.has_option("machine", key):
+            cur.set("machine", key, prev.get("machine", key))
+
+with open(tag_path, "w") as f:
+    cur.write(f)
+EOF
+        rm -f "${run_dir}/.experiment.tag.prev"
+    fi
+
+    # A completed run's manifest is part of the record too.
+    stamp_manifest "${run_dir}"
+
     echo "Updated: ${run_dir}/experiment.tag"
+}
+
+cmd_harvest() {
+    local run_dir
+    run_dir="$(cd "$1" && pwd)"
+
+    need_tag "${run_dir}"
+
+    stamp_manifest "${run_dir}"
 }
 
 cmd_reproduce() {
@@ -384,6 +502,7 @@ case "${command}" in
     init)       cmd_init "$1" ;;
     run)        cmd_run "$1" ;;
     record)     cmd_record "$1" ;;
+    harvest)    cmd_harvest "$1" ;;
     reproduce)  cmd_reproduce "$@" ;;
     *)          echo "ERROR: Unknown command: ${command}" >&2; usage ;;
 esac

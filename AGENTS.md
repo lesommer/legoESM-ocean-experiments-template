@@ -4,8 +4,9 @@ This document explains the purpose, philosophy, boundaries, and working conventi
 of this repository for AI coding agents.
 
 For cross-repo architecture and conventions shared across all three repos
-(legoESM, legoESM-ocean-runners, this ledger), see `workspace-conventions.md`
-(also symlinked to the workspace root as `AGENTS.md` via `bin/setup-workspace`).
+(legoESM, legoESM-ocean-runners, this ledger), see
+`workspace-conventions.md` in this repo (also symlinked to the workspace root
+as `AGENTS.md` via `bin/setup-workspace`).
 
 ## 1. Purpose
 
@@ -46,8 +47,18 @@ run.yaml (intent) → config.yaml (resolved) → experiment.tag (provenance)
 - `experiment.tag` is the permanent reproducibility record — never delete or modify it.
 - `runner_tag` in `experiment.tag` must resolve to a validated tag in
   `../legoESM-ocean-runners`. If it reads `untagged`, the chain is broken.
+- `series.yaml.runner_tag` in `reports/` must also match a valid tag.
 - Never commit an experiment directory that is missing `config.yaml` or
   `experiment.tag` after the experiment has been run.
+
+**Reproducibility verification checklist.** Before considering an experiment complete,
+verify:
+
+- [ ] `config.yaml` matches `run.yaml` + overrides
+- [ ] `experiment.tag` has a valid `runner_tag` (not `untagged`)
+- [ ] `experiment.tag` legoESM commit matches `legoESM_version.txt` in the runners
+- [ ] The tag recorded in `experiment.tag` exists in `../legoESM-ocean-runners`
+- [ ] `series.yaml.runner_tag` (if the experiment is in a report) matches
 
 **Experiments as data, not code.** This repo contains declarative specs (`run.yaml`)
 and generated provenance records (`experiment.tag`, `config.yaml`). It does not
@@ -88,11 +99,15 @@ runs/                One subdirectory per experiment — the core of this repo
 
 analysis/            Reusable diagnostics and cross-experiment intercomparisons
   diagnostics/       Importable functions for computing physical quantities (MLD, heat content, etc.)
-  intercomparisons/  Scripts comparing multiple experiments
+                     Functions take xarray.Dataset as input, return computed quantities, no side effects.
+                     Not standalone scripts — imported by per-run or intercomparison scripts.
+  intercomparisons/  Scripts comparing multiple experiments (output images saved alongside, also copied to reports/)
 
 reports/             Dated, shareable experiment-series reports
   <YYYY-MM-DD-description>/
     series.yaml      Experiment series manifest (runner_tag, machine, experiments)
+    <YYYY-MM-DD-title>.md       Dated report (Markdown with embedded images)
+    <YYYY-MM-DD-title>/         Companion folder for report images (PNG, PDF)
 
 machines/            Personal machine configurations (tracked here, not in runners)
   _template.yaml     Schema reference
@@ -125,6 +140,8 @@ plans/               Pre-experiment planning documents
   `../legoESM-ocean-runners`. If a template or runner needs changing, do it there.
 - **Not a data store.** No NetCDF, Zarr, or large binary files. Output data lives
   on HPC filesystems and is referenced by path in `experiment.tag`.
+- **Not an archive.** Raw output files are not committed. The `experiment.tag` and
+  `config.yaml` capture enough metadata to locate and reproduce the output.
 - **Not a fork.** This repo depends on legoESM and legoESM-ocean-runners as sibling
   directories. It does not vendor or duplicate their code.
 
@@ -137,9 +154,15 @@ Every experiment directory follows the pattern:
 ```
 
 - **`<nickname>`** — short machine nickname from `machines/<machine>.yaml` `nickname` field
-  (e.g., `laptop`, `cluster`)
+  (e.g., `laptop`, `cluster1`)
 - **`<YYYY-MM-DD>`** — date the experiment was declared/created
 - **`<description>`** — short hyphen-separated description of the experiment
+
+Examples:
+
+- `laptop_2026-05-30_scm-convective`
+- `cluster_2026-07-01_orca1-tke`
+- `hpc_2026-08-15_omip-jra55`
 
 This naming convention encodes the execution machine directly in the directory name,
 making it immediately clear where an experiment ran and when it was set up.
@@ -168,31 +191,56 @@ status: planned                           # planned | submitted | running | comp
   still resolve as legacy aliases. See the runners README for the browsable
   list.
 - `machine` — optional. YAML filename in `machines/` (without path). If omitted,
-  auto-detected from the current hostname using `bin/lego-detect-machine`.
+  auto-detected from the current hostname using `bin/lego-detect-machine`, which matches
+  `hostname -s` against `hostnames` lists in `machines/*.yaml`.
 - `overrides` — optional. Dot-notation keys matching the template YAML structure.
 - `status` — required. One of: `planned`, `submitted`, `running`, `completed`, `failed`.
   Update this as the experiment progresses.
+
+**Lifecycle:**
+
+| Status | Expected files in `runs/<name>/` |
+|--------|-----------------------------------|
+| `planned` | `run.yaml` only (optionally `notes.md`) |
+| `submitted` | `run.yaml`, `config.yaml`, `experiment.tag` |
+| `running` | `run.yaml`, `config.yaml`, `experiment.tag` |
+| `completed` | `run.yaml`, `config.yaml`, `experiment.tag` (with `execution_hostname` and `execution_date`), `notes.md` |
+| `failed` | `run.yaml`, `config.yaml`, `experiment.tag` (with `execution_hostname` and `execution_date`), `notes.md` (with error details) |
 
 ## 7. Working Conventions
 
 ### Cross-Machine Workflow
 
-1. **Design locally**: Write `runs/<nickname>_<date>_<desc>/run.yaml`, commit, push
-2. **Execute remotely**: Pull, run `bin/run-experiment init runs/<nickname>_<date>_<desc>/`,
-   then `bin/run-experiment run runs/<nickname>_<date>_<desc>/` (machine auto-detected
-   from hostname), update `status` in `run.yaml`, commit and push
+1. **Design locally**: Write `runs/laptop_2026-06-01_my-exp/run.yaml`, commit, push
+2. **Execute remotely**: Pull, run `bin/run-experiment init runs/laptop_2026-06-01_my-exp/`,
+   then `bin/run-experiment run runs/laptop_2026-06-01_my-exp/` (machine auto-detected
+   from hostname), update `status` in `run.yaml`, commit and push. After a successful run,
+   `execution_hostname` and `execution_date` are written to `experiment.tag`.
 3. **Review locally**: Pull, read `experiment.tag` and `notes.md`, write analysis
-   scripts in the run directory
+   scripts in `runs/laptop_2026-06-01_my-exp/`
 
 ### `bin/run-experiment` Commands
 
 - `init <run-dir>` — Reads `run.yaml`, calls the runners' init with `--output-dir`
-  pointing to the run directory
+  pointing to the run directory; files are written directly to
+  `runs/<nickname>_<date>_<description>/`
 - `run <run-dir>` — Executes the experiment via the runners; on success, writes
-  `execution_hostname` and `execution_date` to `experiment.tag`
-- `record <run-dir>` — Re-generates `experiment.tag` from the current state
+  `execution_hostname` and `execution_date` to `experiment.tag`. On direct
+  (non-scheduler) runs, also harvests the run's `run_manifest.json` into
+  `experiment.tag [manifest]` (`state_digest`, `config_hash`, `runner_tag`,
+  with a loud cross-check if the run-time legoESM commit differs from the
+  init-time pin)
+- `record <run-dir>` — Re-generates `experiment.tag` from the current state,
+  preserving the recorded `[reproducibility] overrides` and post-run stamps
+  (they cannot be recovered from the resolved `config.yaml`), then harvests
+  the manifest
+- `harvest <run-dir>` — Stamps `run_manifest.json` results into
+  `experiment.tag [manifest]`; for scheduler (SLURM/OAR) runs, call this
+  after the job completes — the manifest is written by the job, not the
+  submission
 - `reproduce <run-dir>` — Calls the runners' `reproduce.py` using the committed
-  `experiment.tag`
+  `experiment.tag` (supports `--verify` to audit the tag against the current
+  checkout, and `--run` to re-init re-applying the recorded overrides)
 
 ### `bin/lego-detect-machine` — Machine Auto-Detection
 
@@ -213,21 +261,75 @@ Used internally by `bin/run-experiment` when `machine` is omitted from `run.yaml
 Machine YAML files live in `machines/` in this repo (not in the runners repo).
 They may contain absolute paths and personal settings — this is acceptable here
 because the repo is personal. The `bin/run-experiment` script passes the machine
-config path to the runners when initialising an experiment. See `machines/_template.yaml`
-for the full schema.
+config path to the runners when initialising an experiment.
+
+**Machine docs must stay in sync.** Each machine deserves a section in
+`how-to-setup-and-run-experiments.md` (profile, one-time setup, activation,
+running, caveats). When adding or editing a machine YAML, update the
+corresponding section (and vice versa). This includes the venv setup
+procedure — if the `env_setup` commands, venv location, or a setup script
+referenced there change, the how-to guide must reflect that.
+
+**Machine YAML schema:**
+
+```yaml
+nickname: laptop                          # Short name for directory naming (used in experiment dir names)
+hostnames:                                # List of hostname -s outputs for auto-detection
+  - my-laptop
+ssh_alias: ""                             # Optional: ~/.ssh/config alias for cross-machine ops
+                                          # (sync/status/onboard/monitor from your laptop);
+                                          # empty = local machine, no ssh relay
+workspace: ""                             # Optional: absolute path of the lego-world workspace on
+                                          # this machine (e.g. /home/<user>/lego-world);
+                                          # fallback: dirname(legoesm_dir)
+scheduler: slurm|oar|pbs|lsf|null
+scheduler_partition: <string>
+scheduler_account: <string>
+scheduler_walltime: "01:00:00"
+scheduler_nodes: <int>
+scheduler_tasks_per_node: <int>
+oar_project: <string>                   # OAR only (scheduler: oar): --project allocation, e.g. my-project
+oar_resources: "/nodes=1"               # OAR only: resource tree, e.g. /nodes=1/gpu=1; walltime appended from scheduler_walltime
+oar_properties: <string>                # OAR only: SQL WHERE clause, e.g. "gpumodel = 'V100'"
+oar_types: [<string>]                   # OAR only: job types, e.g. [devel] or [besteffort]
+devices: auto|cpu|gpu|tpu
+n_devices: auto|<int>
+precision: fp32|fp64|mixed
+data_root: <path>
+legoesm_dir: <path>
+output_root: <path>
+env_setup: [<shell commands>]
+```
+
+The `nickname` field is used to construct experiment directory names following the
+`<nickname>_<YYYY-MM-DD>_<description>` convention. The `hostnames` list enables
+auto-detection via `bin/lego-detect-machine`. The optional `ssh_alias` and `workspace`
+fields support cross-machine operations (sync, status, monitor): machines with an
+`ssh_alias` are remote machines reached over SSH, machines without one are local.
 
 ### Analysis Scripts and Notebooks
 
 - Per-experiment analysis scripts and notebooks go in `runs/<experiment-name>/`,
-  making each run directory self-contained. Use `Path(__file__).resolve().parent`
-  as `run_dir` in these scripts.
+  making each run directory self-contained (declaration + provenance + output + analysis).
+  Use `Path(__file__).resolve().parent` as `run_dir` in these scripts.
 - Reusable importable functions for computing physical quantities (MLD, heat content,
   etc.) go in `analysis/diagnostics/`. Functions take `xarray.Dataset` as input,
-  return computed quantities, and have no side effects.
+  return computed quantities, and have no side effects. Not standalone scripts.
 - Cross-experiment intercomparison scripts go in `analysis/intercomparisons/`.
-- Notebooks are committed with output cells stripped (nbstripout pre-commit hook).
-- Use paths from `experiment.tag` to locate output data — never hardcode
-  machine-specific absolute paths in analysis scripts that should be portable.
+  Output images are saved alongside the script and also copied to `reports/`
+  when preparing reports.
+- Notebooks are committed with output cells stripped (nbstripout pre-commit hook)
+- Analysis scripts may reference output data paths from `experiment.tag` files —
+  never hardcode HPC paths in analysis scripts that are meant to be portable
+
+### Naming Conventions
+
+- Experiment directory names: `<nickname>_<YYYY-MM-DD>_<description>`
+  (e.g., `laptop_2026-05-30_scm-convective`, `cluster_2026-07-01_orca1-tke`,
+  `hpc_2026-08-15_omip-jra55`)
+- The `<nickname>` comes from the `nickname` field in `machines/<machine>.yaml`
+- Machine configs: YAML filename is the machine identifier
+  (e.g., `my-laptop.yaml`, `my-cluster.yaml`)
 
 ## 8. What Agents Should Do
 
@@ -252,11 +354,14 @@ for the full schema.
 
 ### Add analysis for an experiment
 
-1. Create scripts/notebooks in `runs/<experiment-name>/` — use
-   `Path(__file__).resolve().parent` as `run_dir`
-2. For reusable diagnostic functions, add them to `analysis/diagnostics/`
+1. Create scripts/notebooks in `runs/<experiment-name>/` — the run directory is
+   self-contained (use `Path(__file__).resolve().parent` as `run_dir`)
+2. For reusable diagnostic functions (MLD, heat content, etc.), add them to
+   `analysis/diagnostics/` as importable functions taking `xarray.Dataset` as input
 3. For notebooks: ensure nbstripout is active (output cells will be stripped on commit)
 4. Use paths from `experiment.tag` to locate output data — never hardcode
+5. For cross-experiment comparisons, use `analysis/intercomparisons/`
+   (output images saved alongside the script, also copied to `reports/`)
 
 ### Help reproduce a past experiment
 
@@ -269,8 +374,7 @@ for the full schema.
 - **Never edit `../legoESM/`** — the model code is not touched from this repo
 - **Never edit `../legoESM-ocean-runners/`** — templates and runners are changed in
   their own repo; this repo only *consumes* them
-- **Never commit data files** — no NetCDF, Zarr, or large binaries (small PNG images
-  are the exception)
+- **Never commit data files** — no NetCDF, Zarr, or large binaries (PNG images in `reports/` are the exception — see §10)
 - **Never modify generated files** — `config.yaml` and `experiment.tag` are outputs of
   `bin/run-experiment init`. If they are wrong, fix the `run.yaml` and re-init.
 - **Never commit an experiment directory missing provenance** — after an experiment has
@@ -278,6 +382,10 @@ for the full schema.
   `run.yaml` alone is only acceptable for `status: planned` experiments.
 - **Never hardcode machine-specific absolute paths** in `run.yaml` or analysis scripts
   that should be portable. Machine-specific paths belong in `machines/*.yaml`.
+- **Never add or modify a `machines/*.yaml` without also updating the matching section
+  in `how-to-setup-and-run-experiments.md`**, and vice versa. The how-to guide and
+  machine configs must always be in sync — including `env_setup` commands, venv
+  location, and any setup scripts referenced.
 - **Never commit notebook output cells** — nbstripout handles this, but verify if
   manually creating notebooks
 - **Never delete `experiment.tag` files** — they are the permanent provenance record
@@ -285,6 +393,15 @@ for the full schema.
   the real-world state of the experiment
 - **Never run experiments automatically** — always wait for the user to decide when
   and where to execute
+- **Never leave `project_status.md` stale after a successful end-to-end run.** If you
+  run an experiment through the runners end-to-end (YAML → model object → output) and
+  that template is not yet listed as "run tested" in
+  `../legoESM-ocean-runners/project_status.md`, open an issue on the
+  [legoESM-ocean-runners repo](https://github.com/lesommer/legoESM-ocean-runners/issues)
+  requesting the update. Include the template name, mode, and a link to the experiment
+  directory.
+- **Never modify a dated report** after it has been shared — write a new dated report
+  instead (e.g., `2026-06-02-revised.md`)
 - **Never commit an experiment with `runner_tag = untagged`** after the experiment has
   been completed — regenerate the tag to ensure the reproducibility chain is intact
 
@@ -296,11 +413,107 @@ for the full schema.
 | Resolved configs | `runs/<nickname>_<date>_<desc>/config.yaml` |
 | Provenance records | `runs/<nickname>_<date>_<desc>/experiment.tag` |
 | Human notes | `runs/<nickname>_<date>_<desc>/notes.md` |
-| Per-experiment analysis | `runs/<nickname>_<date>_<desc>/*.py`, `*.ipynb` |
+| Per-experiment analysis | `runs/<nickname>_<date>_<desc>/*.py`, `runs/<nickname>_<date>_<desc>/*.ipynb` |
 | Reusable diagnostics | `analysis/diagnostics/` |
 | Cross-experiment intercomparisons | `analysis/intercomparisons/` |
+| Experiment series manifests | `reports/<series>/series.yaml` |
+| Dated reports | `reports/<series>/<date>-<title>.md` |
+| Report images | `reports/<series>/<date>-<title>/` |
 | Machine configs | `machines/<name>.yaml` |
 | Runner helper script | `bin/run-experiment` |
 | Machine auto-detection | `bin/lego-detect-machine` |
 | Runners repo (read-only) | `../legoESM-ocean-runners/` |
 | legoESM repo (read-only) | `../legoESM/` |
+| Patches | `patches/*.patch` |
+
+## 11. Experiment Series and Reports
+
+### Motivation
+
+Experiments naturally come in **series** — groups of related runs that share a common
+configuration, are run on the same machine, and need to be compared against each other.
+A series groups these runs together; a **report** is a dated, shareable document that
+presents the analysis of a series.
+
+### Series directory
+
+Each series lives in `reports/<YYYY-MM-DD-description>/` where the date is the date the
+series was started and the description is a short lowercase-hyphenated label:
+
+```
+reports/
+  2026-05-30-scm-convective/
+    series.yaml
+    2026-05-30-initial-findings.md
+    2026-05-30-initial-findings/
+      convective_comparison.png
+      laptop_2026-05-30_scm-convective/convective_analysis.png
+      ...
+  2026-06-15-omip-jra55/
+    series.yaml
+    2026-06-15-baseline.md
+    2026-06-15-baseline/
+      ...
+```
+
+### `series.yaml` schema
+
+```yaml
+name: <string>                              # Human-readable series name
+runner_tag: <legoesm-<hash>-<date>>         # Validated tag in legoESM-ocean-runners
+machine: <string>                            # Machine YAML filename (matches machines/<name>.yaml)
+date: <YYYY-MM-DD>                          # Date the series was started
+experiments:                                 # Ordered list of runs in this series
+  - <nickname>_<date>_<desc>
+  - ...
+status: <planned | running | completed>      # Overall series status
+description: >                               # Free-text description
+  ...
+```
+
+**Key rules:**
+
+- `runner_tag` must match a validated tag in `../legoESM-ocean-runners`. All experiments
+  in a series share the same runner + legoESM version (same-machine assumption).
+- `experiments` references existing `runs/<nickname>_<date>_<desc>/` directories — no duplication.
+- The series is the natural unit for comparison: cross-experiment intercomparison
+  scripts go in `analysis/intercomparisons/`; output images are saved alongside
+  the script and copied to the report's companion folder when preparing reports.
+
+### Dated reports
+
+A report is a Markdown file with a **companion image folder** of the same name:
+
+```
+2026-05-30-initial-findings.md      ← The report
+2026-05-30-initial-findings/        ← Companion images (PNG)
+  convective_comparison.png
+  laptop_2026-05-30_scm-convective/convective_analysis.png
+```
+
+**Rules:**
+
+- **Dated filenames**: `YYYY-MM-DD-<short-title>.md`. The date prevents ambiguity.
+- **Relative image paths**: Use `./YYYY-MM-DD-<short-title>/image.png` in the Markdown
+  so it renders on GitHub and in local Markdown viewers.
+- **Copy, don't symlink**: Images are copied from `runs/` and `analysis/` into the
+  companion folder. This makes the report self-contained and shareable (zip the folder).
+- **PNG images are committed to git** — they are small (typically 100–300 KB) and
+  enabling GitHub rendering is worth the repo size cost.
+- **Immutable once shared**: A dated report is not modified after it has been shared.
+  If findings change, write a new dated report (e.g., `2026-06-02-revised.md`).
+- **No raw data in reports**: NetCDF, Zarr, and other large data files must never be
+  placed in `reports/`. Only PNG/PDF images and the Markdown document itself.
+
+### Workflow
+
+1. **Create a series**: Make `reports/<date>-<description>/series.yaml` listing the
+   experiments, runner tag, and machine.
+2. **Run experiments**: Declare runs in `runs/` (using `<nickname>_<date>_<desc>` naming), init, execute, update status.
+3. **Analyse**: Write per-experiment analysis scripts in `runs/<nickname>_<date>_<desc>/` and
+    cross-experiment intercomparison scripts in `analysis/intercomparisons/`.
+4. **Generate report**: Write a dated Markdown report, copy relevant PNG images
+    (from `runs/<nickname>_<date>_<desc>/` and `analysis/intercomparisons/`) into the companion
+   folder, commit and push.
+5. **Share**: The report folder is self-contained — send the Markdown file and its
+   companion image folder, or point colleagues to the GitHub rendered view.
